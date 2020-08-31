@@ -1,3 +1,4 @@
+###If the sqlserver powershell module isnt installed, this script won't run correctly. This checks for the install.
 if (Get-Module -ListAvailable -Name sqlserver) {
     Import-Module sqlserver
   } 
@@ -5,16 +6,17 @@ else {
 Install-Module sqlserver
 Import-Module sqlserver
 }
-  
+ 
+###Allows us to create the Windows form
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-#The drop down list that also works as a text box needs an array of options for the drop down box
-$computerNames = @("itsql.it.tamu.edu","sql2.tamu.edu","itsqldev.tamu.edu","itsqldev2.tamu.edu")
+#The drop down list of servers, that also works as a text box, needs an array of options for the drop down box. Add servers to this inside of "double quotes".
+$computerNames = @("<server-Name>")
 
 function ServerName{
-    ###Old Server Name###
-    #Sets up the form for the old server name
+    ###Server Name###
+    #Sets up the form for the server name
     $formServerName = New-Object System.Windows.Forms.Form
     $formServerName.Text = 'Server Name'
     $formServerName.Size = New-Object System.Drawing.Size(300,200)
@@ -59,31 +61,25 @@ function ServerName{
 
     if ($result -eq [System.Windows.Forms.DialogResult]::OK)
     {
+        #Set our ServerName variable equal to whatever server the user chose in the Windows Form for the entire script.
         $Script:ServerName = $comboBox.Text
-        #If the server name entered is not in the array above, this adds it
+        
+        #If the server name entered is not in the array above, this adds it to the array
         if($computerNames -notcontains $ServerName) {
             $file = $PSCommandPath
             $file
             $original = (Get-Content -Path $file -Raw)
-            # Write-Host "This is the original:
-            # $original
-            # "
+            
             #Match the end of the line that is the array
             $text = $original -match '(\$computerNames\ =\ @\(.+"\))'
             $text = $Matches.1
-        
             $len = $text.Length - 1
-            #Insert the "new" old server name into the array
+            
+            #Insert the "new" server name into the array
             $newtext = $text.Insert($len,",""$ServerName""")
-            # Write-Host "This is the new text:
-            # $newtext
-            # "
+            
             #Replace the file with the new text
             $final = $original.Replace($text, $newtext)
-            # Write-Host "This is the final:
-            # $final
-            # "
-                
             $final | Set-Content -Path $file
         }
     }
@@ -91,12 +87,12 @@ function ServerName{
         exit
     }
 }
+#Run the ServerName function above to get the server you are checking for databases not in AG's.
 ServerName
-# $ServerName
 
 function DatabaseName{
     ###Database Name###
-
+    #Sets up the form for the databases that aren't in an AG
     $formDatabaseName = New-Object System.Windows.Forms.Form -Property @{
         Text = 'Database Name'
         Size = New-Object System.Drawing.Size(400,700)
@@ -137,7 +133,6 @@ function DatabaseName{
     }
     $formDatabaseName.Controls.Add($label)
 
-    <# This will create a list of all available software in our form #>
     $DatabaseNameslistBox = New-Object System.Windows.Forms.Listbox -Property @{
         Location = New-Object System.Drawing.Point((($formDatabaseName.Left) + 40),(($formDatabaseName.Top) + 90))
         Size = New-Object System.Drawing.Size(($formDatabaseName.Width - 100), ($formDatabaseName.Height - 230))
@@ -155,13 +150,18 @@ function DatabaseName{
     $formDatabaseName.Controls.Add($DatabaseNameslistBox)
     $formDatabaseName.Topmost = $true
 
+    #This is the sql query we use on the server specified in the ServerName function. It will select all db's not in an AG
     $DatabaseNamesQuery = "select DISTINCT sd.name
     from sys.databases as sd
     left outer join sys.dm_hadr_database_replica_states  as hdrs on hdrs.database_id = sd.database_id
     left outer join sys.dm_hadr_name_id_map as grp on grp.ag_id = hdrs.group_id
     where grp.ag_name is null
     and sd.name not in ('master','model','msdb','tempdb')"
+    
+    #Get the databases using the tsql above on the ServerName chosen in the ServerName function
     $DatabaseNames = @(Invoke-Sqlcmd -ServerInstance $ServerName -Query $DatabaseNamesQuery | Select-Object name)
+    
+    #For each database found, add it to our Windows Form for the user to select
     foreach($DatabaseName in $DatabaseNames.Name){
         [void] $DatabaseNameslistBox.Items.Add($DatabaseName)
     }
@@ -175,31 +175,33 @@ function DatabaseName{
         exit
     }
 }
+#Run the DatabaseName function above
 DatabaseName
-# $DatabaseNames
 
+#Set up the tsql variable we will be saving to a file at the end of the program
 $agdbAddTsql = ""
+
+#For each database the user select in the DatabaseName function
 foreach($DatabaseName in $DatabaseNames){
-    ###Get replica
+    ###Get server replica
     $ServerReplicaQuery = "SELECT DISTINCT replica_server_name
     FROM sys.availability_replicas
     WHERE replica_server_name not in(SELECT @@SERVERNAME)"
     $MachineReplica = @(Invoke-SQLCmd -ServerInstance $ServerName -query $ServerReplicaQuery) | Select-Object replica_server_name
     $MachineReplica = $MachineReplica.replica_server_name
     $ServerReplicaName = $MachineReplica + ".services.ads.tamu.edu"
-    # $MachineReplica
-    # $ServerReplicaName
-    ###Get AG
+    
+    ###Get any AG. Can specify in a where clause for this tsql
     $agquery = "SELECT TOP 1
     Groups.[Name] AS AGname
     FROM master.sys.availability_groups Groups
     INNER JOIN sys.availability_databases_cluster AGDatabases ON Groups.group_id = AGDatabases.group_id"
 
-    #Get the AG name
+    #Get the AG name in a variable
     $agdb = @(Invoke-Sqlcmd -ServerInstance $ServerName -Query $agquery) | Select-Object AGname
     $agdb = $agdb.AGname
-    # $agdb
-    #This adds the databases to the AG on both servers. By adding to the secondary replica AG this way, the database is being created as well.
+    
+    #This adds the databases to the AG on both servers. By adding to the secondary replica AG this way, the database is being created on the secondary server as well.
     $agdbAddTsql = $agdbAddTsql + "------ Add $DatabaseName to both the primary and secondary replica AG's.`n" +
     "PRINT CHAR(13)+CHAR(10) + '*********' + CHAR(13)+CHAR(10) + 'Adding $DatabaseName to Availability Group' + CHAR(13)+CHAR(10) + '*********' + CHAR(13)+CHAR(10) + CHAR(13)+CHAR(10)`nGO`n" +
     ":Connect $ServerName
@@ -221,5 +223,6 @@ foreach($DatabaseName in $DatabaseNames){
     ALTER AVAILABILITY GROUP [$agdb] GRANT CREATE ANY DATABASE;
     GO`n`n"   
 }
+#Save the tsql to a the same folder as this script
 $agdbAddTsql | Out-File "$PSScriptRoot\Add_to_AG.sql"
 
